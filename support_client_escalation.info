@@ -1,0 +1,13 @@
+name = Support Client Escalation 
+package = Support
+description = Implements ticket escalation rules and per-client chain of command
+dependencies[] = support 
+core = 7.x
+files[] = support_client_escalation.test
+
+; Information added by drupal.org packaging script on 2011-06-03
+version = "7.x-1.x-dev"
+core = "7.x"
+project = "support"
+datestamp = "1307061807"
+

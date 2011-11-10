@@ -1,0 +1,100 @@
+<?php
+
+/**
+ * @file
+ * Test that escalation path can be set correctly for a client, and that tickets created for a client
+ * are successfully escalated up the line.
+ */
+
+class SupportClientEscalationTestCase extends DrupalWebTestCase {
+  protected $privileged_user;
+
+  public static function getInfo() {
+    return array(
+      'name' => 'Support Client Escalation',
+      'description' => 'Ensure that escalation rules and chain of command are functioning correctly',
+      'group' => 'Support',
+    );
+  }
+
+  public function setUp() {
+    parent::setUp('support_client_escalation');  // Enable any modules required for the test
+    // Create three users to add to the chain of command
+    $this->first_user = $this->drupalCreateUser(array('administer support', 'create tickets', 'can suppress notification'));
+    $this->second_user = $this->drupalCreateUser(array('administer support'));
+    $this->third_user = $this->drupalCreateUser(array('administer support'));
+    $this->drupalLogin($this->first_user);
+  }
+
+  // Create a support client with an escalation path, and make sure escalation path is set correctly
+  public function testSupportClientSetEscalationPath() {
+    // Create node to edit.
+    $edit = array();
+    $edit['name'] = $this->randomName(8);
+    $edit['path'] = $this->randomName(8);
+    $edit['escalation_path'] = implode(', ', array($this->first_user->name, $this->second_user->name, $this->third_user->name));
+    $this->drupalPost('admin/config/support/clients/add', $edit, t('Add client'));
+    $this->assertText(t('Client @name created.', array('@name' => $edit['name'])));
+    
+    // Test that the ID is set in the database correctly.
+    // Mostly the first line is useful here as it pulls the clid from the database for future tests
+    // But while we're here we might as well test it came back correctly, right.
+    $this->client = db_query("SELECT * FROM {support_client} WHERE name = :name AND path = :path", array(':name' => $edit['name'], ':path' => $edit['path']))->fetch();
+    $this->assertEqual($this->client->name, $edit['name'], t('Client name set correctly in database with ID @clid', array('@clid' => $this->client->clid)));
+    //$this->assertEqual($this->client->last_escalation_uid, 0, t('Last escalation UID is set to 0 (ie. never escalated)'));
+    
+    $escalated_users = db_query("SELECT uid FROM {support_client_escalation} WHERE clid = :clid ORDER BY weight ASC", array(':clid' => $this->client->clid))->fetchCol();
+    $users = user_load_multiple($escalated_users);
+    foreach($users as $user) {
+      $escalation_path_db[] = $user->name;
+    }
+    $this->assertEqual(implode(', ', $escalation_path_db), $edit['escalation_path'], t('Escalation path set correctly in database'));
+
+    $edit = array();
+    $edit['title'] = $this->randomName(8);
+    $edit['body[und][0][value]'] = $this->randomName(8);
+    $edit['client'] = $this->client->clid;
+    $edit['suppress'] = TRUE;
+    $this->drupalPost('node/add/support-ticket', $edit, t('Save'));
+    $this->assertText(t('Support ticket @name has been created', array('@name' => $edit['title'])));
+
+    $ticket = db_query("SELECT nid FROM {node} WHERE title = :title", array(':title' => $edit['title']))->fetch();
+    $ticket = node_load($ticket->nid);
+
+    $tickets_to_escalate = _support_client_escalation_find();
+    $this->assertTrue(empty($tickets_to_escalate), t('New tickets do not show up in a list of tickets to escalate'));
+
+    // Move time back 5 days
+    db_query("UPDATE {node} SET changed = :changed WHERE title = :title", array(':title' => $edit['title'], ':changed' => date('U') - 500000));
+    
+    $tickets_to_escalate = _support_client_escalation_find();
+    $this->assertTrue(!empty($tickets_to_escalate), t('Tickets over 5 days old show up in a list of tickets to escalate'));    
+
+    support_client_escalation_escalate($ticket->nid);
+    $ticket = node_load($ticket->nid);
+    $this->assertEqual($ticket->assigned, $this->first_user->uid, t('Ticket correctly escalated to first user in the list with UID @uid', array('@uid' => $this->first_user->uid)));
+
+    // Move time back 5 days again
+    db_query("UPDATE {node} SET changed = :changed WHERE title = :title", array(':title' => $edit['title'], ':changed' => date('U') - 500000));
+
+    support_client_escalation_escalate($ticket->nid);
+    $ticket = node_load($ticket->nid);
+    $this->assertEqual($ticket->assigned, $this->second_user->uid, t('Ticket correctly escalated to second user in the list with UID @uid. Database UID is @duid', array('@uid' => $this->second_user->uid, '@duid' => $ticket->assigned)));
+
+    // Move time back 5 days again
+    db_query("UPDATE {node} SET changed = :changed WHERE title = :title", array(':title' => $edit['title'], ':changed' => date('U') - 500000));
+
+    support_client_escalation_escalate($ticket->nid);
+    $ticket = node_load($ticket->nid);
+    $this->assertEqual($ticket->assigned, $this->third_user->uid, t('Ticket correctly escalated to third user in the list with UID @uid. Database UID is @duid', array('@uid' => $this->third_user->uid, '@duid' => $ticket->assigned)));
+
+    // Move time back 5 days again
+    db_query("UPDATE {node} SET changed = :changed WHERE title = :title", array(':title' => $edit['title'], ':changed' => date('U') - 500000));
+
+    support_client_escalation_escalate($ticket->nid);
+    $ticket = node_load($ticket->nid);
+    $this->assertEqual($ticket->assigned, $this->third_user->uid, t('Ticket stays assigned to third user in the list with UID @uid when trying to escalate off the end of the escalation path. Database UID is @duid', array('@uid' => $this->third_user->uid, '@duid' => $ticket->assigned)));
+
+
+  }
+}

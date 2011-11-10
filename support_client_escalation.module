@@ -1,0 +1,232 @@
+<?php
+
+/**
+ * Implementation of hook_cron()
+ */
+function support_client_escalation_cron() {
+  $tickets_to_escalate = _support_client_escalation_find();
+  foreach($tickets_to_escalate as $ticket) {
+    support_client_escalation_escalate($ticket->nid);
+    watchdog('support_client_escalation', 'Escalated ticket %nid', array('%nid' => $ticket->nid));
+  }
+}
+ 
+/**
+ * Implementation of hook_node_load().
+ */
+function support_client_escalation_node_load($nodes, $types) {
+  $result = db_query('SELECT nid,last_escalation_uid FROM {support_ticket} WHERE nid IN(:nids)', array(':nids' => array_keys($nodes)));
+  foreach ($result as $record) {
+    if ($nodes[$record->nid]->type == 'support_ticket') {
+      $nodes[$record->nid]->last_escalation_uid = $record->last_escalation_uid;
+    }
+  }
+}
+
+/**
+ * Add user checkboxes to clients list
+ */
+function support_client_escalation_form_support_admin_client_alter(&$form, &$form_state, $client = NULL) {
+  $clid = $form['clid']['#value'];
+  /**
+   * Fetch list of users who are allowed to access this client and return as a comma-separated list of usernames
+   **/
+  $result = db_select('support_client_escalation')
+            ->fields('support_client_escalation')
+            ->condition('clid', $clid)
+            ->execute();
+  $users = array();
+  while($record = $result->fetchAssoc()) {
+    $user = user_load($record['uid']);
+    if($user) {
+      $users[] = $user->name;
+    }
+  } 
+  $users = implode(', ', $users);
+
+  $id = isset($clid) ? $clid : 0;
+  $path = 'support/autocomplete/useraccess';
+  
+  $form['escalation_path'] = array(
+    '#type' => 'textfield',
+    '#title' => t('Escalation path'),
+    '#autocomplete_path' => $path,
+    '#maxlength' => 255,
+    '#weight' => 1,
+    '#default_value' => !empty($users) ? $users : '',
+    '#description' => t('Enter a comma-separated list of usernames to whom !client issues should be escalated to if they are not closed after a certain period of time.', array('!client' => isset($client->name) ? $client->name : 'client')),
+  );
+  
+  // Put the users_clients field above the notes and submit buttons
+  $form['notes']['#weight'] = 2;
+  $form['submit']['#weight'] = 3;
+  $form['delete']['#weight'] = 4;
+
+  $form['#submit'][] = 'support_client_escalation_form_support_admin_client_submit';
+  $form['#validate'][] = 'support_client_escalation_form_support_admin_client_validate';
+}
+
+function support_client_escalation_form_support_admin_client_validate($form, &$form_state) {
+  if(empty($form_state['values']['escalation_path'])) {
+    return;
+  }
+
+  if(empty($form_state['values']['clid'])) {
+    $client = db_query("SELECT * FROM {support_client} WHERE name = :name AND path = :path", array(':name' => $form_state['values']['name'], ':path' => $form_state['values']['path']))->fetch();
+    $form_state['values']['clid'] = $client->clid;
+  }
+  
+  $client = support_client_load($form_state['values']['clid']);
+  
+  $users = explode(', ', $form_state['values']['escalation_path']);
+  
+  $users = user_load_multiple(array(), array('name' => $users));
+
+  $i = 0;
+  foreach($users as $uid => $user) {
+    if(!empty($user) && !empty($client) && !support_access_clients($client, $user)) {
+      form_set_error('escalation_path', t('User %user does not have access to this client. You cannot escalate tickets to a user who does not have access to the client.', array('%user' => $user->name)));
+    }  
+  }  
+}
+
+/**
+ * Take the list of users who are allowed to access and convert to a list of uid, clid pairs in the database
+ * 
+ * @todo: Is this really the best way to do the database queries?
+ */
+function support_client_escalation_form_support_admin_client_submit($form, &$form_state) {
+  if(empty($form_state['values']['clid'])) {
+    $client = db_query("SELECT * FROM {support_client} WHERE name = :name AND path = :path", array(':name' => $form_state['values']['name'], ':path' => $form_state['values']['path']))->fetch();
+    $form_state['values']['clid'] = $client->clid;
+  }
+
+  db_delete('support_client_escalation')
+    ->condition('clid', $form_state['values']['clid'])
+    ->execute();
+  
+  if(empty($form_state['values']['escalation_path'])) {
+    return;
+  }
+  
+  $users = explode(', ', $form_state['values']['escalation_path']);
+  
+  $users = user_load_multiple(array(), array('name' => $users));
+
+  $i = 0;
+  foreach($users as $uid => $user) {
+    db_insert('support_client_escalation')
+      ->fields(array('uid' => $uid, 'clid' => $form_state['values']['clid'], 'weight' => $i))
+      ->execute();
+    $i++;
+  }
+}
+
+/**
+ * Returns a list of tickets and last escalation IDs that need to be escalated
+ * 
+ * @todo Make interval dynamic
+ */
+function _support_client_escalation_find() {
+  $interval = 259200; // 3 days
+  return db_query("SELECT n.nid, s.last_escalation_uid FROM {node} n INNER JOIN {support_ticket} s ON n.nid = s.nid WHERE type='support_ticket' AND changed < (UNIX_TIMESTAMP() - :interval)", array(':interval' => $interval))->fetchAll();
+}
+
+/**
+ * Returns the escalation path for a client as an array of uids
+ */
+function _support_client_escalation_path($clid) {
+  return db_query("SELECT uid FROM {support_client_escalation} WHERE clid = :clid ORDER BY weight ASC", array(':clid' => $clid))->fetchCol();
+}
+
+/**
+ * Escalates a ticket to the next user in the escalation path
+ */
+function support_client_escalation_escalate($nid) {
+  $ticket = node_load($nid);
+  $escalation_path = _support_client_escalation_path($ticket->client);
+
+  // If the ticket is unassigned or not in the escalation queue, start at the front of the queue
+  if($ticket->assigned == 0 || !in_array($ticket->assigned, $escalation_path)) {
+    $target_uid = $escalation_path[0];
+  } else {
+    // If we're already partially into the escalation queue then move the ticket up to the next person
+    for($i=0; $i<sizeof($escalation_path); $i++) {
+      if($escalation_path[$i] == $ticket->assigned) {
+        // If there's no $i+1 (ie. the buck stops here), don't escalate, just leave it where it is
+        if(!empty($escalation_path[$i+1])) {
+          $target_uid = $escalation_path[$i+1];
+        }
+      }
+    }
+  }
+  
+  // If we found someone to escalate to, save the updated ticket
+  if(!empty($target_uid) && $target_uid != $ticket->assigned) {
+    $ticket->assigned = $target_uid;
+    // Set ticket to "re-assigned".
+    $ticket->state = 5;
+    node_save($ticket);
+    
+    // Add comment with status changes to show escalation
+    // This is copy-pasted from support.module. Wish it was in a function.
+    
+    $account = user_load(1);
+    
+   // by retrieving the maximum thread level.
+    $max = db_query('SELECT MAX(thread) FROM {comment} WHERE nid = :nid', array(':nid' => $ticket->nid))->fetchField();
+    // Strip the "/" from the end of the thread.
+    $max = rtrim($max, '/');
+    // Finally, build the thread field for this new comment.
+    $thread = int2vancode(vancode2int($max) + 1) . '/';
+
+    $comment = new stdClass();
+    $comment->cid = NULL;
+    $comment->pid = 0;
+    $comment->uid = $account->uid;
+    $comment->nid = $ticket->nid;
+    $comment->status = COMMENT_PUBLISHED;
+    $comment->thread = $thread;
+    $comment->subject = $ticket->title;
+    $comment->hostname = ip_address();
+    $comment->language = LANGUAGE_NONE;
+    $comment->name = $account->name;
+    $comment->mail = $account->mail;
+    $comment->timestamp = REQUEST_TIME;
+    //$comment->comment_body = array(LANGUAGE_NONE => array(''));
+// TODO
+// It seems http://drupal.org/project/comment_upload has no D7 port yet?
+// $comment->files = _support_save_attachments($message['attachments'], $account);
+    //$comment->message_id = $message_id;
+    $comment->state = $ticket->state;
+    $comment->priority = $ticket->priority;
+    $comment->client = $ticket->client;
+    $comment->assigned = $ticket->assigned;
+    $active = db_query('SELECT active FROM {support_assigned} WHERE nid = :nid AND uid = :uid', array(':nid' => $ticket->nid, ':uid' => $account->uid))->fetchField();
+    if ($active !== false)
+      $comment->notification = $active;
+    else
+      $comment->notification = 1;
+    $comment->support_email = 1;
+
+    comment_save($comment);
+
+    // Add an entry to the watchdog log.
+    watchdog('content', 'Comment: added %subject.', array('%subject' => $comment->subject), WATCHDOG_NOTICE, l(t('view'), 'node/' . $comment->nid, array('fragment' => 'comment-' . $comment->cid)));
+    _comment_update_node_statistics($comment->nid);
+
+    // Clear the cache so an anonymous user can see his comment being added.
+    cache_clear_all();
+    
+    //debug(print_r(db_query('SELECT * FROM {comment}')->fetchAll(), 1));
+  }
+}
+
+/**
+ * When a user is deleted, remove them from any client access lists
+ */
+function support_client_escalation_user_delete($account) {
+  db_delete('support_client_escalation')
+    ->condition('uid', $account->uid)
+    ->execute();
+}

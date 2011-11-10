@@ -1,0 +1,40 @@
+<?php
+
+function support_client_escalation_install() {
+  db_add_field('support_ticket', 'last_escalation_uid', array('type' => 'int', 'not null' => TRUE, 'default' => 0, 'description' => 'Last UID this ticket was escalated to'));
+}
+
+function support_client_escalation_uninstall() {
+  db_drop_field('support_ticket', 'last_escalation_uid');
+}
+
+/**
+ * Support database schema definition.
+ */
+function support_client_escalation_schema() {
+  $schema['support_client_escalation'] = array(
+    'description' => 'Stores the chain of command for ticket escalation on a client.',
+    'fields' => array(
+      'clid' => array(
+        'type' => 'int',
+        'not null' => TRUE,
+        'unsigned' => TRUE,
+        'default' => 0,
+      ),
+      'uid' => array(
+        'type' => 'int',
+        'not null' => TRUE,
+        'unsigned' => TRUE,
+        'default' => 0,
+      ),
+      'weight' => array(
+        'type' => 'int',
+        'not null' => TRUE,
+        'unsigned' => TRUE,
+        'default' => 0,
+      ),
+    ),
+    'primary key' => array('clid', 'uid'),
+  );
+  return $schema;
+}
