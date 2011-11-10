@@ -24,7 +24,7 @@ function support_client_escalation_node_load($nodes, $types) {
 }
 
 /**
- * Add user checkboxes to clients list
+ * Add comma-separated textfield to client page to accept escalation queue.
  */
 function support_client_escalation_form_support_admin_client_alter(&$form, &$form_state, $client = NULL) {
   $clid = $form['clid']['#value'];
