@@ -92,8 +92,6 @@ function support_client_escalation_form_support_admin_client_validate($form, &$f
 
 /**
  * Take the list of users who are allowed to access and convert to a list of uid, clid pairs in the database
- * 
- * @todo: Is this really the best way to do the database queries?
  */
 function support_client_escalation_form_support_admin_client_submit($form, &$form_state) {
   if(empty($form_state['values']['clid'])) {
@@ -171,9 +169,9 @@ function support_client_escalation_escalate($nid) {
     // Add comment with status changes to show escalation
     // This is copy-pasted from support.module. Wish it was in a function.
     
+    // Post comment from system
     $account = user_load(1);
     
-   // by retrieving the maximum thread level.
     $max = db_query('SELECT MAX(thread) FROM {comment} WHERE nid = :nid', array(':nid' => $ticket->nid))->fetchField();
     // Strip the "/" from the end of the thread.
     $max = rtrim($max, '/');
@@ -193,20 +191,18 @@ function support_client_escalation_escalate($nid) {
     $comment->name = $account->name;
     $comment->mail = $account->mail;
     $comment->timestamp = REQUEST_TIME;
-    //$comment->comment_body = array(LANGUAGE_NONE => array(''));
-// TODO
-// It seems http://drupal.org/project/comment_upload has no D7 port yet?
-// $comment->files = _support_save_attachments($message['attachments'], $account);
+    $comment->comment_body = array(LANGUAGE_NONE => array('Ticket was escalated to user ' . $target_uid));
     //$comment->message_id = $message_id;
     $comment->state = $ticket->state;
     $comment->priority = $ticket->priority;
     $comment->client = $ticket->client;
     $comment->assigned = $ticket->assigned;
     $active = db_query('SELECT active FROM {support_assigned} WHERE nid = :nid AND uid = :uid', array(':nid' => $ticket->nid, ':uid' => $account->uid))->fetchField();
-    if ($active !== false)
+    if ($active !== false) {
       $comment->notification = $active;
-    else
+    } else {
       $comment->notification = 1;
+    }
     $comment->support_email = 1;
 
     comment_save($comment);
@@ -217,8 +213,6 @@ function support_client_escalation_escalate($nid) {
 
     // Clear the cache so an anonymous user can see his comment being added.
     cache_clear_all();
-    
-    //debug(print_r(db_query('SELECT * FROM {comment}')->fetchAll(), 1));
   }
 }
 
